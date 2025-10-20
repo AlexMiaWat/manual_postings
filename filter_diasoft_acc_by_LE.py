@@ -66,7 +66,7 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
         errors_ws.append([Path(file_path).name, "", "Нет данных в файле"])
         return 0, 0, 1
 
-    # Создаём новый файл для вывода
+    # Создаём новый файл для вывода только если есть данные для записи
     out_file = os.path.join(OUT_DIR, Path(file_path).name)
     wb_out = load_workbook(file_path)
     ws_out = wb_out.active
@@ -86,16 +86,11 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
     for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
         ws_out.cell(row=1, column=col[0].column).value = col[0].value
 
-    # Создаём лист в skipped_wb для этого файла
     file_name = Path(file_path).name
-    skipped_ws = skipped_wb.create_sheet(title=file_name[:31])  # Ограничение на длину имени листа
-    # Копируем заголовки в skipped_ws
-    for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
-        skipped_ws.cell(row=1, column=col[0].column).value = col[0].value
-
     filtered_count = 0
     skipped_count = 0
     error_count = 0
+    skipped_rows = []  # Список строк для skipped
 
     # Логирование начала обработки файла
     with open(LOG_FILE, "a", encoding="utf-8") as log:
@@ -155,25 +150,41 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
         elif is_error:
             error_count += 1
             errors_ws.append([file_name, str(row_idx), error_desc])
+            # Строки с ошибками также добавляем в skipped_rows
+            skipped_rows.append(row)
+            skipped_count += 1
         else:
             skipped_count += 1
-            # Копируем строку в skipped_ws с сохранением стилей
+            # Добавляем строку в skipped_rows
+            skipped_rows.append(row)
+
+    # Создаём лист в skipped_wb только если есть данные для записи
+    if skipped_rows:
+        skipped_ws = skipped_wb.create_sheet(title=file_name[:31])  # Ограничение на длину имени листа
+        # Копируем заголовки в skipped_ws
+        for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
+            skipped_ws.cell(row=1, column=col[0].column).value = col[0].value
+        # Записываем строки в skipped_ws
+        for row_idx, row in enumerate(skipped_rows, start=1):
             for col_idx, cell in enumerate(row, start=1):
-                skipped_ws.cell(row=skipped_count + 1, column=col_idx).value = cell.value
+                skipped_ws.cell(row=row_idx + 1, column=col_idx).value = cell.value
                 if cell.has_style:
                     try:
-                        skipped_ws.cell(row=skipped_count + 1, column=col_idx).style = cell.style
+                        skipped_ws.cell(row=row_idx + 1, column=col_idx).style = cell.style
                     except Exception as e:
                         print(f"⚠️ Ошибка при копировании стиля в skipped: {e}")
 
-    # Сохраняем результат
-    try:
-        wb_out.save(out_file)
-        print(f"Записано {filtered_count} проводок в {out_file}")
-    except Exception as e:
-        print(f"False Ошибка при сохранении {out_file}: {e}")
-        errors_ws.append([file_name, "", f"Ошибка сохранения файла: {e}"])
-        return 0, 0, error_count + 1
+    # Сохраняем результат только если есть отфильтрованные строки
+    if filtered_count > 0:
+        try:
+            wb_out.save(out_file)
+            print(f"Записано {filtered_count} проводок в {out_file}")
+        except Exception as e:
+            print(f"False Ошибка при сохранении {out_file}: {e}")
+            errors_ws.append([file_name, "", f"Ошибка сохранения файла: {e}"])
+            return 0, 0, error_count + 1
+    else:
+        print(f"Нет проводок для записи в {out_file} - файл не создан")
 
     # Сохранение skipped.xlsx и errors.xlsx будет в main после обработки всех файлов
 
@@ -266,7 +277,7 @@ def main():
                 log.write(f"\n### Ошибка обработки файла {Path(file_path).name} ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
                 log.write(f"Ошибка: {e}\n")
 
-    # Сохраняем skipped.xlsx после обработки всех файлов
+    # Сохраняем skipped.xlsx после обработки всех файлов только если есть листы
     if len(skipped_wb.sheetnames) > 0:
         try:
             skipped_wb.save(os.path.join(OUT_DIR, SKIPPED_FILE))
