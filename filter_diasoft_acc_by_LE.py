@@ -19,7 +19,6 @@ os.makedirs(OUT_DIR, exist_ok=True)
 for file in os.listdir(OUT_DIR):
     os.remove(os.path.join(OUT_DIR, file))
 
-
 def load_le_set(le_file: str) -> set:
     """Загружает список LE из файла, убирает пробелы, тире, приводит к верхнему регистру."""
     le_set = set()
@@ -43,9 +42,16 @@ def load_le_set(le_file: str) -> set:
             log.write(f"Ошибка при чтении {le_file}: {e}\n")
     return le_set
 
+def is_empty_row(row) -> bool:
+    """Проверяет, является ли строка полностью пустой (все ячейки None, пустые строки, пробелы или не значимые символы)."""
+    for cell in row:
+        if cell.value is not None:
+            value_str = str(cell.value).strip()
 
-# Функция find_le_columns удалена, так как поиск LE теперь по значениям в строках
-
+            # Проверяем, что строка не состоит только из пробелов и не значимых символов
+            if value_str and not all(c.isspace() or c in ' \t\n\r\f\v' for c in value_str):
+                return False
+    return True
 
 def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_ws):
     """
@@ -98,6 +104,10 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
 
     # Обрабатываем строки данных
     for row_idx, row in enumerate(sheet.iter_rows(min_row=header_row + 1), start=header_row + 1):
+        # Пропускаем пустые строки
+        if is_empty_row(row):
+            continue
+
         match_found = False
         reason = ""
         is_error = False
@@ -196,7 +206,6 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
         log.write(f"- Ошибки: {error_count} строк\n")
 
     return filtered_count, skipped_count, error_count
-
 
 def main():
     # Логирование начала обработки
@@ -301,7 +310,6 @@ def main():
     with open(LOG_FILE, "a", encoding="utf-8") as log:
         log.write(f"\n## Обработка завершена ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
         log.write("Все файлы обработаны.\n")
-
 
 if __name__ == "__main__":
     main()
