@@ -1,399 +1,554 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+filter_diasoft_acc_by_LE.py
+Фильтрует строки из xlsx-файлов по списку LE (LE.txt), сохраняет
+отфильтрованные строки в отдельные xlsx-файлы (в папку out/),
+а пропущенные строки собирает в skipped.xlsx. Ошибки логируются в errors.xlsx.
+Сохраняет стили ячеек (шрифт, границы, фон, выравнивание и т.д.) и заголовки.
+Также удаляет пустые строки в конце выходного листа.
+"""
+
 import os
 import glob
 import re
 import datetime
+import logging
 import pandas as pd
 from openpyxl import load_workbook, Workbook
 from pathlib import Path
+from copy import copy
+try:
+    from rich.console import Console
+    from rich.text import Text
+    RICH_AVAILABLE = True
+except ImportError:
+    RICH_AVAILABLE = False
 
-# Путь к файлу LE.txt
+# ========== Настройки файлов и директорий ==========
 LE_FILE = "LE.txt"
 OUT_DIR = "out"
 SKIPPED_FILE = "skipped.xlsx"
 ERRORS_FILE = "errors.xlsx"
-LOG_FILE = "log.md"
+LOG_FILE = "log.md"  # также используем logging модуль для файла .md
 
-# Создаём папку out, если её нет
+# ========== Настройки красивого вывода ==========
+if RICH_AVAILABLE:
+    console = Console()
+else:
+    console = None
+
+# Создаём папку out если нет
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# Очищаем каталог out/
-for file in os.listdir(OUT_DIR):
-    os.remove(os.path.join(OUT_DIR, file))
+# Очищаем папку out (удаляем файлы внутри)
+for f in os.listdir(OUT_DIR):
+    try:
+        os.remove(os.path.join(OUT_DIR, f))
+    except Exception:
+        pass
+
+# ========== Настройка логирования ==========
+logger = logging.getLogger("filter_le")
+logger.setLevel(logging.DEBUG)
+
+# File handler - пишет в LOG_FILE (append) чистый MD без префиксов
+fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+fh.setLevel(logging.DEBUG)
+fh_formatter = logging.Formatter("%(message)s")  # Только сообщение, без времени и уровня
+fh.setFormatter(fh_formatter)
+
+# Console handler - INFO и выше в консоль с цветами если rich доступен
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+ch_formatter = logging.Formatter("%(levelname)s: %(message)s")
+ch.setFormatter(ch_formatter)
+
+logger.addHandler(fh)
+logger.addHandler(ch)
+
+# ========== Вспомогательные функции для красивого вывода ==========
+
+from rich.table import Table
+from rich.panel import Panel
+from rich.markdown import Markdown
+from datetime import datetime
+
+def log_md(message: str, level: str = "INFO"):
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    prefix = {
+        "INFO": "✅",
+        "WARNING": "⚠️",
+        "ERROR": "❌",
+    }.get(level, "ℹ️")
+    md_message = f"> **[{timestamp}] {prefix} {message}**"
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{md_message}\n")
+
+    # Красивый вывод в консоль
+    if console:
+        color_map = {"INFO": "green", "WARNING": "yellow", "ERROR": "red"}
+        color = color_map.get(level, "white")
+        console.print(Panel(f"[{color}]{message}[/]", title=level, expand=False))
+    else:
+        print(f"{timestamp} {level}: {message}")
+
+def log_header(text: str, level: int = 1):
+    """
+    Логирует заголовок MD.
+    """
+    hashes = "#" * level
+    msg = f"{hashes} {text}"
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"{msg}\n")
+
+def log_list_item(text: str):
+    """
+    Логирует элемент списка MD.
+    """
+    msg = f"- {text}"
+    log_md(msg, "INFO")
+
+def log_table(headers: list, rows: list):
+    """
+    Логирует таблицу MD.
+    """
+    if not headers or not rows:
+        return
+    # Заголовок
+    header_line = "| " + " | ".join(headers) + " |"
+    separator = "| " + " | ".join(["---"] * len(headers)) + " |"
+    table_lines = [header_line, separator]
+    for row in rows:
+        row_line = "| " + " | ".join(str(cell) for cell in row) + " |"
+        table_lines.append(row_line)
+    msg = "\n".join(table_lines)
+    log_md(msg, "INFO")
+
+def log_file_separator():
+    """
+    Добавляет визуальный разделитель между обработкой файлов в консоли.
+    """
+    if console:
+        console.print("\n" + "=" * 60 + "\n", style="blue")
+    else:
+        print("\n" + "=" * 60 + "\n")
+
+def log_total_stats(filtered: int, skipped: int, errors: int):
+    """
+    Логирует итоговую статистику в красивом формате.
+    """
+    if console:
+        try:
+            console.print("\n[bold cyan]ИТОГОВАЯ СТАТИСТИКА:[/bold cyan]")
+            console.print(f"   [green]Отфильтровано: {filtered} строк[/green]")
+            console.print(f"   [yellow]Пропущено: {skipped} строк[/yellow]")
+            console.print(f"   [red]Ошибок: {errors} строк[/red]")
+            console.print("[blue]" + "=" * 60 + "[/blue]")
+        except UnicodeEncodeError:
+            console.print("\n[bold cyan]ИТОГОВАЯ СТАТИСТИКА:[/bold cyan]")
+            console.print(f"   [green]Отфильтровано: {filtered} строк[/green]")
+            console.print(f"   [yellow]Пропущено: {skipped} строк[/yellow]")
+            console.print(f"   [red]Ошибок: {errors} строк[/red]")
+            console.print("[blue]" + "=" * 60 + "[/blue]")
+    else:
+        print(f"\nИТОГОВАЯ СТАТИСТИКА:")
+        print(f"Отфильтровано: {filtered} строк")
+        print(f"Пропущено: {skipped} строк")
+        print(f"Ошибок: {errors} строк")
+
+# Логируем старт скрипта
+log_header("Запуск скрипта filter_diasoft_acc_by_LE.py")
+log_header("Настройки", 2)
+log_header(f"LE файл: {LE_FILE}", 3)
+log_header(f"Выходная папка: {OUT_DIR}", 3)
+log_header(f"Файл пропущенных: {SKIPPED_FILE}", 3)
+log_header(f"Файл ошибок: {ERRORS_FILE}", 3)
+log_header(f"Лог файл: {LOG_FILE}", 3)
+log_md("", "INFO")  # Пустая строка для разделения абзацев
+
+# ========== Вспомогательные функции ==========
 
 def load_le_set(le_file: str) -> set:
-    """Загружает список LE из файла, убирает пробелы, тире, приводит к верхнему регистру."""
+    """
+    Загружает LE из текстового файла.
+    Очищает: пробелы, тире; переводит в верхний регистр.
+    Возвращает set строк.
+    """
     le_set = set()
     try:
-        with open(le_file, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(le_file, "r", encoding="utf-8") as fh:
+            for line in fh:
                 cleaned = line.strip().replace("-", "").replace(" ", "").upper()
                 if cleaned:
                     le_set.add(cleaned)
-        print(f"Загружено {len(le_set)} LE из {le_file}")
-        # Логирование в log.md
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            log.write(f"\n## Загруженные LE ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-            log.write(f"Загружено {len(le_set)} LE из {le_file}:\n")
-            for le in sorted(le_set):
-                log.write(f"- {le}\n")
+        log_header("Загруженные LE", 2)
+        log_list_item(f"Загружено **{len(le_set)}** LE из `{le_file}`")
+        if le_set:
+            log_table(["LE"], [[le] for le in sorted(le_set)])
+            log_md("", "INFO")  # Пустая строка для разделения абзацев
+    except FileNotFoundError:
+        logger.error("Файл %s не найден.", le_file)
     except Exception as e:
-        print(f"Ошибка при чтении {le_file}: {e}")
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            log.write(f"\n## Ошибка загрузки LE ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-            log.write(f"Ошибка при чтении {le_file}: {e}\n")
+        logger.exception("Ошибка при чтении %s: %s", le_file, e)
     return le_set
-
-def is_empty_row(row) -> bool:
-    """Проверяет, является ли строка полностью пустой (все ячейки None, пустые строки, пробелы или не значимые символы)."""
-    for cell in row:
-        if cell.value is not None:
-            value_str = str(cell.value).strip()
-
-            # Проверяем, что строка не состоит только из пробелов и не значимых символов
-            if value_str and not all(c.isspace() or c in ' \t\n\r\f\v' for c in value_str):
-                return False
-    return True
 
 def parse_and_convert_amount(amount_str: str) -> tuple[float | None, str]:
     """
-    Обрабатывает строку суммы:
-    1. Убирает разделители разрядов (например, "427,680,000.00" → "427680000.00")
-    2. Преобразует в число с российским форматом (запятая как разделитель целой и дробной части)
-    3. Возвращает (число, описание ошибки) или (None, описание ошибки) при ошибке
+    Преобразует строку суммы в float.
+    Очищает разделители разрядов (заменяет запятые) и проверяет формат.
+    Возвращает (float, "") при успехе или (None, описание_ошибки).
     """
-    if not amount_str:
+    if amount_str is None or (isinstance(amount_str, str) and amount_str.strip() == ""):
         return None, "Пустое значение суммы"
-    
-    # Убираем разделители разрядов: заменяем запятые на пустую строку
-    cleaned = re.sub(r',', '', str(amount_str))
-    
-    # Проверяем, что осталось только цифры и точка (для дробной части)
+    s = str(amount_str).strip()
+    # Убираем тысячи-разделители запятой и пробелы
+    cleaned = re.sub(r'[,\s]', '', s)
+    # Допускаем точку как разделитель дробной части (427680000.00)
     if not re.match(r'^\d+(\.\d+)?$', cleaned):
-        return None, f"Некорректный формат суммы: {amount_str}"
-    
+        return None, f"Некорректный формат суммы: '{amount_str}' -> cleaned '{cleaned}'"
     try:
-        # Преобразуем в float
-        amount = float(cleaned)
-        
-        return amount, ""
-        
+        val = float(cleaned)
+        return val, ""
     except Exception as e:
         return None, f"Ошибка преобразования в число: {e}"
 
-def write_filtered_rows(file_path: str, le_set: set, skipped_wb, errors_ws):
+def copy_cell_style(src_cell, dest_cell):
     """
-    Записывает строки, где в строке есть "LE" (без учета регистра) и следующая ячейка (Аналитика) совпадает с LE.txt.
-    Использует pandas для чтения и обработки данных, openpyxl для сохранения стилей.
-    Записывает пропущенные строки в skipped.xlsx (лист по файлу).
-    Записывает ошибки в errors.xlsx.
-    Возвращает количество отфильтрованных, пропущенных и ошибок.
+    Копирует визуальные атрибуты ячейки из src_cell в dest_cell.
+    Копируются: font, border, fill, number_format, protection, alignment.
+    Обёртка через copy() чтобы избежать общих ссылок на объекты стилей.
+    """
+    if src_cell is None or not getattr(src_cell, "has_style", False):
+        return
+    try:
+        dest_cell.font = copy(src_cell.font)
+        dest_cell.border = copy(src_cell.border)
+        dest_cell.fill = copy(src_cell.fill)
+        dest_cell.number_format = src_cell.number_format
+        dest_cell.protection = copy(src_cell.protection)
+        dest_cell.alignment = copy(src_cell.alignment)
+    except Exception as e:
+        logger.warning("Не удалось полностью скопировать стиль ячейки %s: %s", getattr(src_cell, "coordinate", "?"), e)
+
+def is_row_empty(ws, row_idx) -> bool:
+    """
+    Проверяет, пустая ли строка row_idx на листе ws.
+    Считается пустой, если все ячейки None или пустая строка после strip().
+    """
+    for cell in ws[row_idx]:
+        if cell.value is not None and str(cell.value).strip() != "":
+            return False
+    return True
+
+def remove_trailing_blank_rows(ws):
+    """
+    Удаляет пустые строк в конце листа ws.
+    Пока последняя строка полностью пустая — удаляет её.
+    Это предотвращает появление лишней пустой строки в конце выходного файла.
     """
     try:
-        # Читаем файл с помощью pandas
+        max_row = ws.max_row
+        # Пытаемся удалить до тех пор, пока последняя строка пустая и > 1 (не удаляем заголовок)
+        while max_row > 1:
+            # ws[max_row] возвращает кортеж ячеек в строке
+            if all((cell.value is None or str(cell.value).strip() == "") for cell in ws[max_row]):
+                ws.delete_rows(max_row, 1)
+                max_row -= 1
+            else:
+                break
+    except Exception as e:
+        logger.exception("Ошибка при удалении пустых строк: %s", e)
+
+# ========== Основная логика обработки одного файла ==========
+def write_filtered_rows(file_path: str, le_set: set, skipped_wb: Workbook, errors_ws):
+    """
+    Читает xlsx файл (через pandas для логики), создаёт/редактирует выходной xlsx
+    (используя openpyxl), записывает отфильтрованные строки с сохранением стилей.
+    Возвращает (filtered_count, skipped_count, error_count).
+    """
+    file_name = Path(file_path).name
+    log_md(f"Начинаю обработку файла: **{file_name}**", "INFO")
+
+    # 1) Читаем файл в pandas (header=None, чтобы найти реальную строку заголовка программно)
+    try:
         df = pd.read_excel(file_path, header=None)
     except Exception as e:
-        print(f"Ошибка при чтении {file_path}: {e}")
-        errors_ws.append([Path(file_path).name, "", f"Ошибка чтения файла: {e}"])
+        logger.exception("Ошибка при чтении %s в pandas: %s", file_name, e)
+        errors_ws.append([file_name, "", f"Ошибка чтения файла: {e}"])
         return 0, 0, 1
 
     if df.empty:
-        print(f"Нет данных в {file_path}")
-        errors_ws.append([Path(file_path).name, "", "Нет данных в файле"])
+        logger.warning("Файл %s пустой.", file_name)
+        errors_ws.append([file_name, "", "Файл пустой"])
         return 0, 0, 1
 
-    # Определяем заголовок (первая непустая строка)
+    # 2) Находим первую непустую строку — считаем её заголовком
     header_row = None
     for idx in df.index:
         if df.loc[idx].notna().any():
             header_row = idx
             break
-
     if header_row is None:
-        print(f"Нет данных в {file_path}")
-        errors_ws.append([Path(file_path).name, "", "Нет данных в файле"])
+        logger.error("Не удалось найти заголовок в %s", file_name)
+        errors_ws.append([file_name, "", "Не найден заголовок"])
         return 0, 0, 1
 
-    # Устанавливаем заголовки
+    # Устанавливаем имена столбцов и отбрасываем строки выше заголовка
     df.columns = df.loc[header_row]
-    df = df.loc[header_row + 1:].reset_index(drop=True)
+    df = df.loc[header_row + 1 :].reset_index(drop=True)
 
-    # Создаём новый файл для вывода
-    out_file = os.path.join(OUT_DIR, Path(file_path).name)
-    wb_out = load_workbook(file_path)
+    # 3) Загружаем workbook через openpyxl — используем файл как шаблон (стили остаются)
+    try:
+        wb_out = load_workbook(file_path)
+    except Exception as e:
+        logger.exception("Ошибка load_workbook для %s: %s", file_name, e)
+        errors_ws.append([file_name, "", f"Ошибка открытия файла: {e}"])
+        return 0, 0, 1
+
     ws_out = wb_out.active
 
-    if not ws_out:
-        print(f"False Невозможно получить активный лист из {file_path}")
-        errors_ws.append([Path(file_path).name, "", "Невозможно получить активный лист"])
-        return 0, 0, 1
+    # Сохраняем индекс исходной строки заголовка в листе для копирования стиля заголовка
+    src_header_row_index = header_row + 1  # потому что pandas 0-based, excel 1-based
 
-    # Очищаем лист, оставляя заголовки
+    # 4) Очищаем значения на листе, оставляя стили и структуру (формат ячеек не удаляется)
     for row in ws_out.iter_rows(min_row=2):
         for cell in row:
             cell.value = None
 
-    # Устанавливаем заголовки в первой строке и копируем стили
+    # 5) Устанавливаем заголовки в первой строке листа и копируем стиль из исходного заголовка
     for col_idx in range(len(df.columns)):
-        header_cell = ws_out.cell(row=1, column=col_idx + 1)
-        orig_header_cell = ws_out.cell(row=header_row + 1, column=col_idx + 1)
+        hdr_cell = ws_out.cell(row=1, column=col_idx + 1)
+        # Устанавливаем значение заголовка.
         try:
-            header_cell.value = df.columns[col_idx]
-        except:
-            # Если merged cell или другая ошибка, пропускаем
-            pass
-        if orig_header_cell.has_style:
-            try:
-                header_cell.style = orig_header_cell.style
-            except Exception as e:
-                print(f"⚠️ Ошибка при копировании стиля заголовка: {e}")
+            hdr_cell.value = df.columns[col_idx]
+        except Exception:
+            # Защита от merged cells или нестандартных заголовков
+            hdr_cell.value = str(df.columns[col_idx])
+        # Копируем стиль заголовочной ячейки из исходной позиции
+        orig_hdr_cell = ws_out.cell(row=src_header_row_index, column=col_idx + 1)
+        copy_cell_style(orig_hdr_cell, hdr_cell)
 
-    file_name = Path(file_path).name
+    # Счётчики
     filtered_count = 0
     skipped_count = 0
     error_count = 0
-    skipped_rows = []  # Список индексов для skipped
+    skipped_rows_indexes = []
 
-    # Логирование начала обработки файла
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(f"\n### Обработка строк файла {Path(file_path).name} ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
+    # Логируем начало построчной обработки
+    log_list_item(f"Начинаю построчную обработку данных для {file_name}")
 
-    # Обрабатываем строки данных
+    # 6) Проходим строки pandas DataFrame и решаем, записывать ли их в выходной файл
     for row_idx, row in df.iterrows():
-        # Пропускаем пустые строки
+        # Пропускаем полностью пустые строки
         if row.isna().all():
             continue
 
         match_found = False
-        reason = ""
         is_error = False
         error_desc = ""
 
-        # Ищем "LE" в строке
+        # Ищем значение "LE" в строке (регистр игнорируем)
         for col_idx, (col_name, value) in enumerate(row.items()):
             cell_value = str(value).strip().upper() if pd.notna(value) else ""
             if cell_value == "LE":
-                # Следующая ячейка как Аналитика
+                # Берём следующую колонку как "Аналитику"
                 if col_idx + 1 < len(row):
-                    analytics_value = str(row.iloc[col_idx + 1]).strip().replace("-", "").replace(" ", "").upper() if pd.notna(row.iloc[col_idx + 1]) else ""
+                    analytics_raw = row.iloc[col_idx + 1]
+                    analytics_value = (
+                        str(analytics_raw).strip().replace("-", "").replace(" ", "").upper()
+                        if pd.notna(analytics_raw)
+                        else ""
+                    )
                     if analytics_value and analytics_value in le_set:
                         match_found = True
-                        reason = f"Фильтрация: да (LE в колонке {col_idx}, Аналитика='{analytics_value}')"
                         break
                     elif analytics_value:
-                        reason = f"Фильтрация: нет (LE в колонке {col_idx}, Аналитика='{analytics_value}' не в LE.txt)"
+                        # Не совпало с LE.txt — это нормальная причина пропуска
+                        is_error = False
                     else:
                         is_error = True
-                        error_desc = f"Пустое значение Аналитики после LE в колонке {col_idx}"
+                        error_desc = f"Пустая аналитика после LE в колонке {col_idx}"
                 else:
                     is_error = True
-                    error_desc = f"LE в колонке {col_idx}, но нет следующей ячейки для Аналитики"
+                    error_desc = f"LE в колонке {col_idx}, но нет следующей колонки для аналитики"
                 break
 
-        if not match_found and not reason and not is_error:
-            is_error = True
-            error_desc = "Не найдено 'LE' в строке"
-
-        # Логирование каждой строки
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            if is_error:
-                log.write(f"- Строка {row_idx + header_row + 2}: Ошибка - {error_desc}\n")
-            else:
-                log.write(f"- Строка {row_idx + header_row + 2}: {reason}\n")
-
-        # Обработка строк нужных данных
+        # Если найдено совпадение — записываем строку в выходной лист
         if match_found:
-            # Преобразование суммы проводки (предполагаем колонку 7, индекс 7)
-            amount_str = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else ""
-            parsed_amount, error_msg = parse_and_convert_amount(amount_str)
-
-            if error_msg:
-                errors_ws.append([file_name, str(row_idx + header_row + 2), f"Ошибка преобразования суммы: {error_msg}"])
+            # Обрабатываем сумму: колонка индекс 7 ожидается числом
+            amount_raw = row.iloc[7] if 7 < len(row) else None
+            parsed_amount, amt_err = parse_and_convert_amount(amount_raw)
+            if amt_err:
+                # Записываем в errors_ws и помечаем как ошибка
+                row_number = row_idx + src_header_row_index + 1  # для лога: реальный номер в исходном файле
+                errors_ws.append([file_name, str(row_number), amt_err])
+                logger.warning("Ошибка суммы в %s строка %s: %s", file_name, row_number, amt_err)
                 is_error = True
-                error_desc = f"Ошибка преобразования суммы: {error_msg}"
+                error_count += 1
+                skipped_rows_indexes.append(row_idx)
+                skipped_count += 1
+                continue
             else:
-                # Успешное преобразование
+                # Заменяем значение в pandas-строке на float для корректной записи
                 row.iloc[7] = parsed_amount
 
-            # Копируем строку с сохранением форматов
+            # Записываем значения и копируем стили по одной ячейке
             for col_idx in range(len(row)):
-                out_cell = ws_out.cell(row=filtered_count + 2, column=col_idx + 1)
+                out_cell = ws_out.cell(row=filtered_count + 2, column=col_idx + 1)  # +2: 1 заголовок
                 out_cell.value = row.iloc[col_idx]
 
-                # Копируем стиль из оригинального файла
-                orig_cell = ws_out.cell(row=row_idx + header_row + 2, column=col_idx + 1)
-                if orig_cell.has_style:
-                    try:
-                        out_cell.style = orig_cell.style
-                    except Exception as e:
-                        print(f"⚠️ Ошибка при копировании стиля: {e}")
+                # Берём "оригинальную" ячейку из исходного листа (до очистки значений
+                # стили всё ещё там). Индекс в исходном листе = header_row + 2 + row_idx
+                orig_row_number = src_header_row_index + 1 + row_idx
+                orig_cell = ws_out.cell(row=orig_row_number, column=col_idx + 1)
+                copy_cell_style(orig_cell, out_cell)
 
-                if col_idx == 7:  # Сумма
-                    out_cell.number_format = '#,##0.00'  # стандартный Excel формат числа с 2 знаками
-
-                if col_idx == 3:  # Дата
-                    out_cell.number_format = 'dd.mm.yyyy'
-
+                # Явно назначаем number_format для важных колонок
+                if col_idx == 7:
+                    out_cell.number_format = "#,##0.00"
+                if col_idx == 3:
+                    out_cell.number_format = "dd.mm.yyyy"
+                    # Попытка преобразовать строку в datetime, если исход был строкой
+                    if isinstance(row.iloc[col_idx], str):
+                        try:
+                            out_cell.value = pd.to_datetime(row.iloc[col_idx])
+                        except Exception:
+                            # Оставляем как есть и логируем предупреждение
+                            logger.debug("Не удалось преобразовать дату '%s' в datetime (файл %s, строка %s)",
+                                         row.iloc[col_idx], file_name, filtered_count + src_header_row_index + 1)
 
             filtered_count += 1
 
-        elif is_error:
-            error_count += 1
-            errors_ws.append([file_name, str(row_idx + header_row + 2), error_desc])
-            skipped_rows.append(row_idx)
-            skipped_count += 1
         else:
+            # Пропускаем строку — добавляем в skipped список
+            skipped_rows_indexes.append(row_idx)
             skipped_count += 1
-            skipped_rows.append(row_idx)
+            if is_error:
+                # Если это была ошибка, записываем её
+                row_number = row_idx + src_header_row_index + 1
+                errors_ws.append([file_name, str(row_number), error_desc])
+                error_count += 1
+                logger.warning("Строка %s пропущена с ошибкой: %s", row_idx + src_header_row_index + 1, error_desc)
 
-    # Создаём лист в skipped_wb для пропущенных строк
-    if skipped_rows:
+    # 7) Записываем skipped лист если есть пропущенные строки
+    if skipped_rows_indexes:
+        log_list_item(f"Создаю лист skipped для {file_name}, строк: {len(skipped_rows_indexes)}")
+        # Создаём отдельный лист
         skipped_ws = skipped_wb.create_sheet(title=file_name[:31])
-        # Копируем заголовки
+        # Копируем заголовок и его стиль из выходного листа (который содержит стиль заголовка)
         for col in range(len(df.columns)):
-            skipped_ws.cell(row=1, column=col + 1).value = df.columns[col]
-        # Записываем пропущенные строки
-        for i, row_idx in enumerate(skipped_rows):
-            row = df.iloc[row_idx]
-            for col_idx in range(len(row)):
-                skipped_ws.cell(row=i + 2, column=col_idx + 1).value = row.iloc[col_idx]
-                # Копируем стиль
-                orig_cell = ws_out.cell(row=row_idx + header_row + 2, column=col_idx + 1)
-                if orig_cell.has_style:
-                    try:
-                        skipped_ws.cell(row=i + 2, column=col_idx + 1).style = orig_cell.style
-                    except Exception as e:
-                        print(f"⚠️ Ошибка при копировании стиля в skipped: {e}")
+            cell = skipped_ws.cell(row=1, column=col + 1)
+            cell.value = df.columns[col]
+            # Копируем стиль из ws_out.header (ячейка 1, col+1)
+            copy_cell_style(ws_out.cell(row=1, column=col + 1), cell)
 
-    # Удаляем пустые строки в конце
-    max_row = ws_out.max_row
-    while max_row > 1 and all(cell.value is None or str(cell.value).strip() == "" for cell in ws_out[max_row]):
-        ws_out.delete_rows(max_row)
-        max_row -= 1
+        # Заполняем пропущенные строки значениями и копируем стили из исходного листа
+        for i, src_row_idx in enumerate(skipped_rows_indexes):
+            row_values = df.iloc[src_row_idx]
+            for col_idx in range(len(row_values)):
+                val = row_values.iloc[col_idx]
+                dest_cell = skipped_ws.cell(row=i + 2, column=col_idx + 1, value=val)
+                orig_row_number = src_header_row_index + 1 + src_row_idx
+                copy_cell_style(ws_out.cell(row=orig_row_number, column=col_idx + 1), dest_cell)
 
-    # Сохраняем результат
+    # 8) Удаляем пустые строки в конце выходного листа перед сохранением
+    remove_trailing_blank_rows(ws_out)
+
+    # 9) Сохраняем выходной файл (только если есть отфильтрованные строки)
     if filtered_count > 0:
+        out_file_path = os.path.join(OUT_DIR, file_name)
         try:
-            wb_out.save(out_file)
-            print(f"Записано {filtered_count} проводок в {out_file}")
+            wb_out.save(out_file_path)
+            log_list_item(f"Файл сохранён: {out_file_path} (строк: {filtered_count})")
         except Exception as e:
-            print(f"False Ошибка при сохранении {out_file}: {e}")
-            errors_ws.append([file_name, "", f"Ошибка сохранения файла: {e}"])
-            return 0, 0, error_count + 1
+            logger.exception("Ошибка при сохранении %s: %s", out_file_path, e)
+            errors_ws.append([file_name, "", f"Ошибка сохранения: {e}"])
+            return filtered_count, skipped_count, error_count + 1
     else:
-        print(f"Нет проводок для записи в {out_file} - файл не создан")
+        log_list_item(f"В файле {file_name} нет строк для записи. Выходной файл не создан.")
 
-    # Логирование итоговых статистик
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(f"\n### Итоговые статистики для файла {Path(file_path).name} ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-        log.write(f"- Отфильтровано: {filtered_count} строк\n")
-        log.write(f"- Пропущено: {skipped_count} строк\n")
-        log.write(f"- Ошибки: {error_count} строк\n")
+    # 10) Итоги для файла
+    log_md(f"Итог **{file_name}** — Отфильтровано: **{filtered_count}**, Пропущено: **{skipped_count}**, Ошибок: **{error_count}**", "INFO")
+    log_md("", "INFO")  # Пустая строка для разделения абзацев
 
     return filtered_count, skipped_count, error_count
 
+# ========== Точка входа ==========
 def main():
-    # Логирование начала обработки
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(f"\n# Запуск скрипта ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-        log.write("Команда: python filter_diasoft_acc_by_LE.py\n")
-
+    # Логирование старта
+    log_header("Старт обработки в папке in/", 2)
     le_set = load_le_set(LE_FILE)
     if not le_set:
-        print("False Нет данных в LE.txt — завершаем")
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            log.write("\n## Завершение с ошибкой\n")
-            log.write("Нет данных в LE.txt\n")
+        log_md("**Ошибка:** LE список пуст — завершаю.", "ERROR")
         return
 
-    # Поиск файлов
     in_files = glob.glob("in/*.xlsx")
     if not in_files:
-        print("False Нет файлов в папке in/")
-        with open(LOG_FILE, "a", encoding="utf-8") as log:
-            log.write("\n## Завершение с ошибкой\n")
-            log.write("Нет файлов в папке in/\n")
+        log_md("**Ошибка:** Нет файлов в папке `in/`. Завершаю.", "ERROR")
         return
 
-    print(f"Найдено {len(in_files)} файлов для обработки")
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(f"\n## Найденные файлы для обработки ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-        log.write(f"Найдено {len(in_files)} файлов:\n")
-        for file_path in in_files:
-            log.write(f"- {Path(file_path).name}\n")
+    log_header("Найденные файлы для обработки", 2)
+    log_list_item(f"Найдено **{len(in_files)}** файлов в папке `in/`")
+    if in_files:
+        log_table(["Файл"], [[Path(fp).name] for fp in in_files])
+        log_md("", "INFO")  # Пустая строка для разделения абзацев
+
+    # Подготовка skipped.xlsx и errors.xlsx
+    skipped_wb = Workbook()
+    # удалим стандартный лист (в openpyxl он создаётся по умолчанию)
+    if skipped_wb.active:
+        skipped_wb.remove(skipped_wb.active)
+
+    errors_wb = Workbook()
+    errors_ws = errors_wb.active
+    errors_ws.append(["Файл", "Строка", "Описание ошибки"])
 
     total_filtered = 0
     total_skipped = 0
     total_errors = 0
 
-    # Очищаем skipped.xlsx и errors.xlsx перед запуском
-    if os.path.exists(os.path.join(OUT_DIR, SKIPPED_FILE)):
-        os.remove(os.path.join(OUT_DIR, SKIPPED_FILE))
-    if os.path.exists(os.path.join(OUT_DIR, ERRORS_FILE)):
-        os.remove(os.path.join(OUT_DIR, ERRORS_FILE))
+    # Обработка каждого файла
+    for fp in in_files:
+        log_header(f"Обработка файла: {Path(fp).name}", 2)
+        f, s, e = write_filtered_rows(fp, le_set, skipped_wb, errors_ws)
+        total_filtered += f
+        total_skipped += s
+        total_errors += e
+        log_file_separator()  # Добавляем разделитель между файлами
 
-    # Подготовка файла пропущенных строк
-    skipped_wb = Workbook()
-    # Удаляем стандартный лист
-    if skipped_wb.active:
-        skipped_wb.remove(skipped_wb.active)
-
-    # Подготовка файла ошибок
-    errors_wb = Workbook()
-    errors_ws = errors_wb.active
-
-    if not errors_ws:
-        print(f"False Невозможно создать активный лист для errors.xlsx")
-        return
-
-    errors_ws.append(["Файл", "Строка", "Описание ошибки"])
-
-    for file_path in in_files:
-        print(f"\n{'='*50}")
-        print(f"Обработка файла: {file_path}")
-        print(f"{'='*50}")
-
+    # Сохраняем skipped.xlsx если есть листы
+    if skipped_wb.sheetnames:
         try:
-            wb = load_workbook(file_path)
-            ws = wb.active
-
-            # Записываем фильтрованные строки (новая логика без пар колонок)
-            filtered, skipped, errors = write_filtered_rows(file_path, le_set, skipped_wb, errors_ws)
-            total_filtered += filtered
-            total_skipped += skipped
-            total_errors += errors
-
+            skipped_out_path = os.path.join(OUT_DIR, SKIPPED_FILE)
+            skipped_wb.save(skipped_out_path)
+            logger.info("Сохранён файл с пропущенными строками: %s", skipped_out_path)
         except Exception as e:
-            print(f"Ошибка при обработке {file_path}: {e}")
-            errors_ws.append([Path(file_path).name, "", f"Ошибка загрузки файла: {e}"])
-            total_errors += 1
-            with open(LOG_FILE, "a", encoding="utf-8") as log:
-                log.write(f"\n### Ошибка обработки файла {Path(file_path).name} ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-                log.write(f"Ошибка: {e}\n")
+            logger.exception("Ошибка при сохранении skipped.xlsx: %s", e)
 
-    # Сохраняем skipped.xlsx после обработки всех файлов только если есть листы
-    if len(skipped_wb.sheetnames) > 0:
-        try:
-            skipped_wb.save(os.path.join(OUT_DIR, SKIPPED_FILE))
-            print(f"Всего пропущено {total_skipped} строк (пропущенные строки записаны в skipped.xlsx)")
-        except Exception as e:
-            print(f"False Ошибка при сохранении {SKIPPED_FILE}: {e}")
-
-    # Сохраняем errors.xlsx после обработки всех файлов
+    # Сохраняем errors.xlsx если были ошибки
     if total_errors > 0:
         try:
-            errors_wb.save(os.path.join(OUT_DIR, ERRORS_FILE))
-            print(f"Всего ошибок {total_errors} (ошибки записаны в errors.xlsx)")
+            errors_out_path = os.path.join(OUT_DIR, ERRORS_FILE)
+            errors_wb.save(errors_out_path)
+            logger.info("Сохранён файл ошибок: %s", errors_out_path)
         except Exception as e:
-            print(f"False Ошибка при сохранении {ERRORS_FILE}: {e}")
+            logger.exception("Ошибка при сохранении errors.xlsx: %s", e)
+    else:
+        logger.info("Ошибок не обнаружено. Файл %s не создан.", ERRORS_FILE)
 
-    print("\n" + "="*50)
-    print("Обработка завершена")
-    print("="*50)
+    # Финальный лог и вывод в консоль статистики
+    log_header("Обработка завершена", 2)
+    log_table(["Показатель", "Количество"],
+                [["Отфильтровано", total_filtered],
+                 ["Пропущено", total_skipped],
+                 ["Ошибок", total_errors]])
+    log_md("", "INFO")  # Пустая строка для разделения абзацев
+    log_md("---", "INFO")  # Разделитель
 
-    # Логирование завершения
-    with open(LOG_FILE, "a", encoding="utf-8") as log:
-        log.write(f"\n## Обработка завершена ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
-        log.write("Все файлы обработаны.\n")
+    # Итоговая статистика в консоли
+    log_total_stats(total_filtered, total_skipped, total_errors)
 
 if __name__ == "__main__":
     main()
