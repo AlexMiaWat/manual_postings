@@ -2,6 +2,7 @@ import os
 import glob
 import re
 import datetime
+import pandas as pd
 from openpyxl import load_workbook, Workbook
 from pathlib import Path
 
@@ -79,26 +80,44 @@ def parse_and_convert_amount(amount_str: str) -> tuple[float | None, str]:
     except Exception as e:
         return None, f"Ошибка преобразования в число: {e}"
 
-def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_ws):
+def write_filtered_rows(file_path: str, le_set: set, skipped_wb, errors_ws):
     """
     Записывает строки, где в строке есть "LE" (без учета регистра) и следующая ячейка (Аналитика) совпадает с LE.txt.
-    Сохраняет форматы и стили исходного файла.
+    Использует pandas для чтения и обработки данных, openpyxl для сохранения стилей.
     Записывает пропущенные строки в skipped.xlsx (лист по файлу).
     Записывает ошибки в errors.xlsx.
     Возвращает количество отфильтрованных, пропущенных и ошибок.
     """
-    first_data_row = None
-    for row in sheet.iter_rows(min_row=1, max_row=20):
-        if any(cell.value is not None and str(cell.value).strip() != "" for cell in row):
-            first_data_row = row[0].row
-            break
+    try:
+        # Читаем файл с помощью pandas
+        df = pd.read_excel(file_path, header=None)
+    except Exception as e:
+        print(f"Ошибка при чтении {file_path}: {e}")
+        errors_ws.append([Path(file_path).name, "", f"Ошибка чтения файла: {e}"])
+        return 0, 0, 1
 
-    if not first_data_row:
+    if df.empty:
         print(f"Нет данных в {file_path}")
         errors_ws.append([Path(file_path).name, "", "Нет данных в файле"])
         return 0, 0, 1
 
-    # Создаём новый файл для вывода только если есть данные для записи
+    # Определяем заголовок (первая непустая строка)
+    header_row = None
+    for idx in df.index:
+        if df.loc[idx].notna().any():
+            header_row = idx
+            break
+
+    if header_row is None:
+        print(f"Нет данных в {file_path}")
+        errors_ws.append([Path(file_path).name, "", "Нет данных в файле"])
+        return 0, 0, 1
+
+    # Устанавливаем заголовки
+    df.columns = df.loc[header_row]
+    df = df.loc[header_row + 1:].reset_index(drop=True)
+
+    # Создаём новый файл для вывода
     out_file = os.path.join(OUT_DIR, Path(file_path).name)
     wb_out = load_workbook(file_path)
     ws_out = wb_out.active
@@ -108,46 +127,54 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
         errors_ws.append([Path(file_path).name, "", "Невозможно получить активный лист"])
         return 0, 0, 1
 
-    # Удаляем старые данные (оставляем только заголовки)
-    for row in ws_out.iter_rows(min_row=1):
+    # Очищаем лист, оставляя заголовки
+    for row in ws_out.iter_rows(min_row=2):
         for cell in row:
             cell.value = None
 
-    # Копируем все заголовки
-    header_row = first_data_row
-    for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
-        ws_out.cell(row=1, column=col[0].column).value = col[0].value
-        ws_out.cell(row=1, column=col[0].column).style = col[0].style
-        ws_out.cell(row=1, column=col[0].column).number_format = col[0].number_format
+    # Устанавливаем заголовки в первой строке и копируем стили
+    for col_idx in range(len(df.columns)):
+        header_cell = ws_out.cell(row=1, column=col_idx + 1)
+        orig_header_cell = ws_out.cell(row=header_row + 1, column=col_idx + 1)
+        try:
+            header_cell.value = df.columns[col_idx]
+        except:
+            # Если merged cell или другая ошибка, пропускаем
+            pass
+        if orig_header_cell.has_style:
+            try:
+                header_cell.style = orig_header_cell.style
+            except Exception as e:
+                print(f"⚠️ Ошибка при копировании стиля заголовка: {e}")
 
     file_name = Path(file_path).name
     filtered_count = 0
     skipped_count = 0
     error_count = 0
-    skipped_rows = []  # Список строк для skipped
+    skipped_rows = []  # Список индексов для skipped
 
     # Логирование начала обработки файла
     with open(LOG_FILE, "a", encoding="utf-8") as log:
         log.write(f"\n### Обработка строк файла {Path(file_path).name} ({datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')})\n")
 
     # Обрабатываем строки данных
-    for row_idx, row in enumerate(sheet.iter_rows(min_row=header_row + 1), start=header_row + 1):
+    for row_idx, row in df.iterrows():
         # Пропускаем пустые строки
-        if is_empty_row(row):
+        if row.isna().all():
             continue
 
         match_found = False
         reason = ""
         is_error = False
         error_desc = ""
-        # Проходим по ячейкам в строке
-        for col_idx, cell in enumerate(row, start=1):
-            cell_value = str(cell.value).strip().upper() if cell.value is not None else ""
+
+        # Ищем "LE" в строке
+        for col_idx, (col_name, value) in enumerate(row.items()):
+            cell_value = str(value).strip().upper() if pd.notna(value) else ""
             if cell_value == "LE":
                 # Следующая ячейка как Аналитика
-                if col_idx < len(row):
-                    analytics_cell = row[col_idx]  # col_idx уже +1 от enumerate
-                    analytics_value = str(analytics_cell.value).strip().replace("-", "").replace(" ", "").upper() if analytics_cell.value is not None else ""
+                if col_idx + 1 < len(row):
+                    analytics_value = str(row.iloc[col_idx + 1]).strip().replace("-", "").replace(" ", "").upper() if pd.notna(row.iloc[col_idx + 1]) else ""
                     if analytics_value and analytics_value in le_set:
                         match_found = True
                         reason = f"Фильтрация: да (LE в колонке {col_idx}, Аналитика='{analytics_value}')"
@@ -160,7 +187,7 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
                 else:
                     is_error = True
                     error_desc = f"LE в колонке {col_idx}, но нет следующей ячейки для Аналитики"
-                break  # Нашли LE, не ищем дальше в строке
+                break
 
         if not match_found and not reason and not is_error:
             is_error = True
@@ -169,73 +196,81 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
         # Логирование каждой строки
         with open(LOG_FILE, "a", encoding="utf-8") as log:
             if is_error:
-                log.write(f"- Строка {row_idx}: Ошибка - {error_desc}\n")
+                log.write(f"- Строка {row_idx + header_row + 2}: Ошибка - {error_desc}\n")
             else:
-                log.write(f"- Строка {row_idx}: {reason}\n")
+                log.write(f"- Строка {row_idx + header_row + 2}: {reason}\n")
 
         # Обработка строк нужных данных
         if match_found:
-            
-            # Преобразование суммы проводки
-            # Предполагаем, что сумма в колонке 8 (индекс 7)
-            amount_str = str(row[7].value).strip() if row[7].value is not None else ""
+            # Преобразование суммы проводки (предполагаем колонку 7, индекс 7)
+            amount_str = str(row.iloc[7]).strip() if pd.notna(row.iloc[7]) else ""
             parsed_amount, error_msg = parse_and_convert_amount(amount_str)
-            
+
             if error_msg:
-                # Ошибка преобразования — добавляем строку в errors.xlsx
-                errors_ws.append([file_name, str(row_idx), f"Ошибка преобразования суммы: {error_msg}"])
+                errors_ws.append([file_name, str(row_idx + header_row + 2), f"Ошибка преобразования суммы: {error_msg}"])
                 is_error = True
                 error_desc = f"Ошибка преобразования суммы: {error_msg}"
             else:
-                # Успешное преобразование — сохраняем число в ячейке
-                row[7].value = parsed_amount
-                row[7].number_format = '# ##0.00'
+                # Успешное преобразование
+                row.iloc[7] = parsed_amount
 
             # Копируем строку с сохранением форматов
-            for col_idx, cell in enumerate(row, start=1):
-                ws_out.cell(row=filtered_count + 2, column=col_idx).value = cell.value
-                if col_idx == 8:
-                    ws_out.cell(row=filtered_count + 2, column=col_idx).number_format = '# ##0.00'
-                
-                # Копируем стиль
-                if cell.has_style:
+            for col_idx in range(len(row)):
+                out_cell = ws_out.cell(row=filtered_count + 2, column=col_idx + 1)
+                out_cell.value = row.iloc[col_idx]
+
+                # Копируем стиль из оригинального файла
+                orig_cell = ws_out.cell(row=row_idx + header_row + 2, column=col_idx + 1)
+                if orig_cell.has_style:
                     try:
-                        # Используем метод copy_style для безопасного копирования стиля
-                       ws_out.cell(row=filtered_count + 2, column=col_idx).style = cell.style
+                        out_cell.style = orig_cell.style
                     except Exception as e:
                         print(f"⚠️ Ошибка при копировании стиля: {e}")
+
+                if col_idx == 7:  # Сумма
+                    out_cell.number_format = '#,##0.00'  # стандартный Excel формат числа с 2 знаками
+
+                if col_idx == 3:  # Дата
+                    out_cell.number_format = 'dd.mm.yyyy'
 
 
             filtered_count += 1
 
         elif is_error:
             error_count += 1
-            errors_ws.append([file_name, str(row_idx), error_desc])
-            # Строки с ошибками также добавляем в skipped_rows
-            skipped_rows.append(row)
+            errors_ws.append([file_name, str(row_idx + header_row + 2), error_desc])
+            skipped_rows.append(row_idx)
             skipped_count += 1
         else:
             skipped_count += 1
-            # Добавляем строку в skipped_rows
-            skipped_rows.append(row)
+            skipped_rows.append(row_idx)
 
-    # Создаём лист в skipped_wb только если есть данные для записи
+    # Создаём лист в skipped_wb для пропущенных строк
     if skipped_rows:
-        skipped_ws = skipped_wb.create_sheet(title=file_name[:31])  # Ограничение на длину имени листа
-        # Копируем заголовки в skipped_ws
-        for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
-            skipped_ws.cell(row=1, column=col[0].column).value = col[0].value
-        # Записываем строки в skipped_ws
-        for row_idx, row in enumerate(skipped_rows, start=1):
-            for col_idx, cell in enumerate(row, start=1):
-                skipped_ws.cell(row=row_idx + 1, column=col_idx).value = cell.value
-                if cell.has_style:
+        skipped_ws = skipped_wb.create_sheet(title=file_name[:31])
+        # Копируем заголовки
+        for col in range(len(df.columns)):
+            skipped_ws.cell(row=1, column=col + 1).value = df.columns[col]
+        # Записываем пропущенные строки
+        for i, row_idx in enumerate(skipped_rows):
+            row = df.iloc[row_idx]
+            for col_idx in range(len(row)):
+                skipped_ws.cell(row=i + 2, column=col_idx + 1).value = row.iloc[col_idx]
+                # Копируем стиль
+                orig_cell = ws_out.cell(row=row_idx + header_row + 2, column=col_idx + 1)
+                if orig_cell.has_style:
                     try:
-                        skipped_ws.cell(row=row_idx + 1, column=col_idx).style = cell.style
+                        skipped_ws.cell(row=i + 2, column=col_idx + 1).style = orig_cell.style
                     except Exception as e:
                         print(f"⚠️ Ошибка при копировании стиля в skipped: {e}")
 
-    # Сохраняем результат только если есть отфильтрованные строки
+    # Удаляем пустые строки в конце
+    max_row = ws_out.max_row
+    while max_row > 1 and all(cell.value is None or str(cell.value).strip() == "" for cell in ws_out[max_row]):
+        ws_out.delete_rows(max_row)
+        max_row -= 1
+
+    # Сохраняем результат
     if filtered_count > 0:
         try:
             wb_out.save(out_file)
@@ -246,8 +281,6 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
             return 0, 0, error_count + 1
     else:
         print(f"Нет проводок для записи в {out_file} - файл не создан")
-
-    # Сохранение skipped.xlsx и errors.xlsx будет в main после обработки всех файлов
 
     # Логирование итоговых статистик
     with open(LOG_FILE, "a", encoding="utf-8") as log:
@@ -324,7 +357,7 @@ def main():
             ws = wb.active
 
             # Записываем фильтрованные строки (новая логика без пар колонок)
-            filtered, skipped, errors = write_filtered_rows(ws, file_path, le_set, skipped_wb, errors_ws)
+            filtered, skipped, errors = write_filtered_rows(file_path, le_set, skipped_wb, errors_ws)
             total_filtered += filtered
             total_skipped += skipped
             total_errors += errors
