@@ -53,6 +53,35 @@ def is_empty_row(row) -> bool:
                 return False
     return True
 
+def parse_and_convert_amount(amount_str: str) -> tuple[float | None, str]:
+    """
+    Обрабатывает строку суммы:
+    1. Убирает разделители разрядов (например, "427,680,000.00" → "427680000.00")
+    2. Преобразует в число с российским форматом (запятая как разделитель целой и дробной части)
+    3. Возвращает (число, описание ошибки) или (None, описание ошибки) при ошибке
+    """
+    if not amount_str:
+        return None, "Пустое значение суммы"
+    
+    # Убираем разделители разрядов: заменяем запятые на пустую строку
+    cleaned = re.sub(r',', '', str(amount_str))
+    
+    # Проверяем, что осталось только цифры и точка (для дробной части)
+    if not re.match(r'^\d+(\.\d+)?$', cleaned):
+        return None, f"Некорректный формат суммы: {amount_str}"
+    
+    try:
+        # Преобразуем в float
+        amount = float(cleaned)
+        
+        # Форматируем с запятой как разделителем целой и дробной части
+        # Возвращаем строку с запятой вместо точки
+        formatted_amount = f"{amount:.2f}".replace('.', ',')
+        return formatted_amount, ""
+        
+    except Exception as e:
+        return None, f"Ошибка преобразования в число: {e}"
+
 def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_ws):
     """
     Записывает строки, где в строке есть "LE" (без учета регистра) и следующая ячейка (Аналитика) совпадает с LE.txt.
@@ -145,10 +174,28 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
             else:
                 log.write(f"- Строка {row_idx}: {reason}\n")
 
+        # Обработка строк нужных данных
         if match_found:
+            
+            # Преобразование суммы проводки
+            # Предполагаем, что сумма в колонке 8 (индекс 7)
+            amount_str = str(row[7].value).strip() if row[7].value is not None else ""
+            parsed_amount, error_msg = parse_and_convert_amount(amount_str)
+            
+            if error_msg:
+                # Ошибка преобразования — добавляем строку в errors.xlsx
+                errors_ws.append([file_name, str(row_idx), f"Ошибка преобразования суммы: {error_msg}"])
+                is_error = True
+                error_desc = f"Ошибка преобразования суммы: {error_msg}"
+            else:
+                # Успешное преобразование — сохраняем число в ячейке
+                row[7].value = parsed_amount
+                #row[7].style = numeric
+
             # Копируем строку с сохранением форматов
             for col_idx, cell in enumerate(row, start=1):
                 ws_out.cell(row=filtered_count + 2, column=col_idx).value = cell.value
+                
                 # Копируем стиль
                 if cell.has_style:
                     try:
@@ -156,7 +203,10 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
                         ws_out.cell(row=filtered_count + 2, column=col_idx).style = cell.style
                     except Exception as e:
                         print(f"⚠️ Ошибка при копировании стиля: {e}")
+
+
             filtered_count += 1
+
         elif is_error:
             error_count += 1
             errors_ws.append([file_name, str(row_idx), error_desc])
