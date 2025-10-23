@@ -117,6 +117,8 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
     header_row = first_data_row
     for col in sheet.iter_cols(min_row=header_row, max_row=header_row):
         ws_out.cell(row=1, column=col[0].column).value = col[0].value
+        ws_out.cell(row=1, column=col[0].column).style = col[0].style
+        ws_out.cell(row=1, column=col[0].column).number_format = col[0].number_format
 
     file_name = Path(file_path).name
     filtered_count = 0
@@ -187,17 +189,19 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
             else:
                 # Успешное преобразование — сохраняем число в ячейке
                 row[7].value = parsed_amount
-                row[7].number_format = '0.00'
+                row[7].number_format = '# ##0.00'
 
             # Копируем строку с сохранением форматов
             for col_idx, cell in enumerate(row, start=1):
                 ws_out.cell(row=filtered_count + 2, column=col_idx).value = cell.value
+                if col_idx == 8:
+                    ws_out.cell(row=filtered_count + 2, column=col_idx).number_format = '# ##0.00'
                 
                 # Копируем стиль
                 if cell.has_style:
                     try:
                         # Используем метод copy_style для безопасного копирования стиля
-                        ws_out.cell(row=filtered_count + 2, column=col_idx).style = cell.style
+                       ws_out.cell(row=filtered_count + 2, column=col_idx).style = cell.style
                     except Exception as e:
                         print(f"⚠️ Ошибка при копировании стиля: {e}")
 
