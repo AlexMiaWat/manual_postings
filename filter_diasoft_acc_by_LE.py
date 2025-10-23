@@ -74,10 +74,7 @@ def parse_and_convert_amount(amount_str: str) -> tuple[float | None, str]:
         # Преобразуем в float
         amount = float(cleaned)
         
-        # Форматируем с запятой как разделителем целой и дробной части
-        # Возвращаем строку с запятой вместо точки
-        formatted_amount = f"{amount:.2f}".replace('.', ',')
-        return formatted_amount, ""
+        return amount, ""
         
     except Exception as e:
         return None, f"Ошибка преобразования в число: {e}"
@@ -190,7 +187,7 @@ def write_filtered_rows(sheet, file_path: str, le_set: set, skipped_wb, errors_w
             else:
                 # Успешное преобразование — сохраняем число в ячейке
                 row[7].value = parsed_amount
-                #row[7].style = numeric
+                row[7].number_format = '0.00'
 
             # Копируем строку с сохранением форматов
             for col_idx, cell in enumerate(row, start=1):
