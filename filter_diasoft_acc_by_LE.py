@@ -90,7 +90,10 @@ def log_md(message: str, level: str = "INFO"):
     if console:
         color_map = {"INFO": "green", "WARNING": "yellow", "ERROR": "red"}
         color = color_map.get(level, "white")
-        console.print(Panel(f"[{color}]{message}[/]", title=level, expand=False))
+        if message.strip():  # Только если сообщение не пустое
+            console.print(Panel(f"[{color}]{message}[/]", title=level, expand=False))
+        else:
+            console.print()  # Просто пустая строка
     else:
         print(f"{timestamp} {level}: {message}")
 
