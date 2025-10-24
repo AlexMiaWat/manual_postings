@@ -350,12 +350,16 @@ def write_filtered_rows(file_path: str, le_set: set, skipped_wb: Workbook, error
 
         match_found = False
         is_error = False
-        error_desc = ""
+
+        error_desc = "В строке не найден LE"
+        has_LE_colmn = False
 
         # Ищем значение "LE" в строке (регистр игнорируем)
         for col_idx, (col_name, value) in enumerate(row.items()):
             cell_value = str(value).strip().upper() if pd.notna(value) else ""
             if cell_value == "LE":
+                has_LE_colmn = True
+
                 # Берём следующую колонку как "Аналитику"
                 if col_idx + 1 < len(row):
                     analytics_raw = row.iloc[col_idx + 1]
@@ -428,7 +432,7 @@ def write_filtered_rows(file_path: str, le_set: set, skipped_wb: Workbook, error
             # Пропускаем строку — добавляем в skipped список
             skipped_rows_indexes.append(row_idx)
             skipped_count += 1
-            if is_error:
+            if is_error or has_LE_colmn == False:
                 # Если это была ошибка, записываем её
                 row_number = row_idx + src_header_row_index + 1
                 errors_ws.append([file_name, str(row_number), error_desc])
