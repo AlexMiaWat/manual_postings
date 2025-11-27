@@ -443,7 +443,7 @@ def write_filtered_rows(file_path: str, le_set: set, skipped_wb: Workbook, error
     if skipped_rows_indexes:
         log_list_item(f"Создаю лист skipped для {file_name}, строк: {len(skipped_rows_indexes)}")
         # Создаём отдельный лист
-        skipped_ws = skipped_wb.create_sheet(title=file_name[:31])
+        skipped_ws = skipped_wb.create_sheet(title=file_name[:25])
         # Копируем заголовок и его стиль из выходного листа (который содержит стиль заголовка)
         for col in range(len(df.columns)):
             cell = skipped_ws.cell(row=1, column=col + 1)
